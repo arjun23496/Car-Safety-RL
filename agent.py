@@ -2,18 +2,45 @@ from __future__ import division
 
 import numpy as np
 
+import copy
+
+
 class FourierExpansion:
 	def __init__(self, i):
 		self.i = i
+		self.list_all_comb = []
+		self.expanded = None
 
 
-	def compute(self, x, state_params):
-		expanded = []
-		for c1 in range(self.i+1):
-			for c2 in range(self.i+1):
-				expanded.append(np.cos(np.pi*(c1*x[0] + c2*x[1])))
+	def compute_sum(self, s, i):
+		i-=1
 
-		return expanded
+		if i<0:
+			return
+
+		for x in range(self.i):
+			self.expanded[i] = x
+			self.compute_sum(s, i)
+
+			if x != self.i-1 or i==s.shape[0]-1:
+		
+				sum_1 = np.pi*np.sum(s*self.expanded)
+				self.list_all_comb.append(sum_1)
+
+
+	def compute(self, x):
+		self.expanded = np.zeros(x.shape[0])
+
+		self.compute_sum(x, x.shape[0])
+
+		self.list_all_comb = np.cos(np.array(self.list_all_comb))
+
+		ret = self.list_all_comb
+
+		self.expanded = None
+		self.list_all_comb = []
+
+		return ret
 
 
 
@@ -41,8 +68,9 @@ class Agent:
 		self.basis_expansion = FourierExpansion(self.hyperparameters['be_degree'])
 
 		# learnable parameter
-		self.be_size = np.power(self.basis_expansion.i+1, number_of_state_variables)
-		self.w = np.zeros(self.be_size*len(self.actions))	# Check initialization of w has any effects
+		# self.be_size = np.power(self.basis_expansion.i, number_of_state_variables)
+		self.be_size = number_of_state_variables
+		self.w = np.ones(self.be_size*len(self.actions))	# Check initialization of w has any effects
 
 		# Required global variables
 		self.cur_state = None
@@ -55,16 +83,29 @@ class Agent:
 
 		self.returns = 0
 
+		self.number_of_true_warnings = 0
+		self.number_of_false_warnings = 0
+		self.number_of_no_warnings = 0
+		self.warning_type = None
+
 
 	def reset(self):
 		self.time = 0
 		self.returns = 0
+		self.number_of_true_warnings = 0
+		self.number_of_false_warnings = 0
+		self.number_of_no_warnings = 0
 		self.environment.reset()
 		self.cur_action = None
 		self.cur_state = None
 		self.next_state = None
 		self.next_action = None
 		self.greedy_action = None
+		self.warning_type = {
+			'no_warning': 0,
+			'true_warning': 0,
+			'false_warning': 0
+		}
 
 
 	def q_value(self, s, a):
@@ -76,12 +117,10 @@ class Agent:
 
 	def w_update(self, delta, a):
 		al, au = self.get_alimit(a)
-		
+
 		prev = self.w.copy()
 
 		self.w[al:au] += delta
-
-		# print self.w
 
 
 	def get_alimit(self, a):
@@ -123,50 +162,82 @@ class Agent:
 
 
 	def sarsa(self):
-		next_position = 0
-		if self.cur_action == None:
-			self.cur_state = self.environment.get_state()
-			self.cur_state = self.scale_state(self.cur_state)
-			# print self.cur_state
-			# Basis Expansion of current state
-			self.cur_state = np.array(self.basis_expansion.compute(self.cur_state, self.state_params))
 
-			self.cur_action = self.get_action(self.cur_state)
+		self.environment.step_reset()
+		self.cur_state = None
+		start = True
 
-		reward = self.environment.interact(self.actions[self.cur_action])
+		while(True):
 
-		self.returns += self.hyperparameters['gamma']*reward
+			if start:
+				start = False
+				self.cur_state = np.array(self.environment.get_state())
+				# self.cur_state = self.basis_expansion.compute(self.cur_state)
+				self.cur_action = self.get_action(self.cur_state)
 
-		self.next_state = self.environment.get_state()
-		next_position, velocity = self.next_state
-		self.next_state = self.scale_state(self.next_state)
-		# print self.next_state
-		self.next_state = np.array(self.basis_expansion.compute(self.next_state, self.state_params))	# Basis Expansion of next state	
-		self.next_action = self.get_action(self.next_state)
+			reward = self.environment.interact(self.cur_action)
+			self.returns += reward			
 
-		if next_position in self.environment.terminal_states:
-			delta = reward - self.q_value(self.cur_state, self.cur_action)
-		else:
-			delta = reward + self.hyperparameters['gamma']*self.q_value(self.next_state, self.next_action) - self.q_value(self.cur_state, self.cur_action)
-		
-		delta *= self.cur_state
-		delta *= self.hyperparameters['alpha']
+			self.next_state = np.array(self.environment.get_state())
+			# self.next_state = self.basis_expansion.compute(self.next_state)
 
-		self.w_update(delta, self.cur_action)
+			self.next_action = self.get_action(self.next_state)
 
-		self.cur_state = self.next_state
-		self.cur_action = self.next_action
+			qsa = self.q_value(self.cur_state, self.cur_action)
+			qsadot = self.q_value(self.next_state, self.next_action)
 
-		self.time+=1
+			if self.environment.get_instance_status():
+				qsadot = 0
+
+			delta = reward + self.hyperparameters['gamma']*qsadot - qsa
+
+			delta *= self.cur_state
+			delta *= self.hyperparameters['alpha']
+
+			self.w_update(delta, self.cur_action)
+
+			self.cur_state = self.next_state
+			self.cur_action = self.next_action
+
+			if self.environment.get_instance_status():
+				break
+
+
+	def test(self):
+		self.environment.step_reset()
+
+		while(True):
+
+			self.cur_state = np.array(self.environment.get_state())
+			# self.cur_state = self.basis_expansion.compute(self.cur_state)
+
+			self.cur_action = self.get_action(self.cur_state, greedy=True)
+
+			reward = self.environment.interact(self.cur_action)
+			self.returns += reward
+
+			if self.environment.warning_type != None:
+				self.warning_type[self.environment.warning_type] += 1
+
+			self.next_state = np.array(self.environment.get_state())
+			# self.next_state = self.basis_expansion.compute(self.next_state)
+
+			self.next_action = self.get_action(self.next_state, greedy=True)
+
+			self.cur_state = self.next_state
+			self.cur_action = self.next_action
+
+			if self.environment.get_instance_status():
+				break		
 
 
 	def qlearning(self):
 		next_position = 0
 		if self.cur_action == None:
 			self.cur_state = self.environment.get_state()
-			self.cur_state = self.scale_state(self.cur_state)
+			# self.cur_state = self.scale_state(self.cur_state)
 			# Basis Expansion of current state
-			self.cur_state = np.array(self.basis_expansion.compute(self.cur_state, self.state_params))
+			# self.cur_state = np.array(self.basis_expansion.compute(self.cur_state, self.state_params))
 
 		self.cur_action = self.get_action(self.cur_state)
 		reward = self.environment.interact(self.actions[self.cur_action])
